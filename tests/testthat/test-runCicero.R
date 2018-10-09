@@ -27,9 +27,9 @@ test_that("make_cicero_cds aggregates correctly", {
 
   set.seed(2018)
   expect_warning(cicero_cds <- make_cicero_cds(input_cds,
-                                 reduced_coordinates = tsne_coords,
-                                 silent = FALSE,
-                                 summary_stats = c("num_genes_expressed")))
+                                               reduced_coordinates = tsne_coords,
+                                               silent = FALSE,
+                                               summary_stats = c("num_genes_expressed")))
   input_cds2 <- input_cds
   fData(input_cds2)$bp1 <- NULL
   set.seed(2018)
