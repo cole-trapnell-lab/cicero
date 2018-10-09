@@ -47,7 +47,7 @@ make_cicero_cds <- function(cds,
                             summary_stats = NULL,
                             size_factor_normalize = TRUE,
                             silent = FALSE) {
-  
+
   assertthat::assert_that(is(cds, "CellDataSet"))
   assertthat::assert_that(is.data.frame(reduced_coordinates) |
                             is.matrix(reduced_coordinates))
@@ -67,86 +67,72 @@ make_cicero_cds <- function(cds,
                                         collapse = " "))
     assertthat::assert_that(sum(sapply(summary_stats, function(x) {
       !(is(pData(cds)[,x], "numeric") | is(pData(cds)[,x], "integer"))})) == 0,
-      msg = paste("All columns in summary_stats must be",
-                  "of class numeric or integer.",
-                  collapse = " "))
+                            msg = paste("All columns in summary_stats must be",
+                                        "of class numeric or integer.",
+                                        collapse = " "))
   }
   assertthat::assert_that(is.logical(size_factor_normalize))
   assertthat::assert_that(is.logical(silent))
-  
+
   reduced_coordinates <- as.data.frame(reduced_coordinates)
-  
+
   reduced_coordinates <- reduced_coordinates[colnames(cds),]
-  
+
   # Create a k-nearest neighbors map
-  nn_map <- FNN::knn.index(reduced_coordinates, k=(k-1)) # no data.frame wrapper
-  
+  nn_map <- as.data.frame(FNN::knn.index(reduced_coordinates, k=(k-1)))
+
   row.names(nn_map) <- row.names(reduced_coordinates)
-  
-  nn_map <- cbind(nn_map, 1:nrow(nn_map))
-  
+  nn_map$agg_cell <- 1:nrow(nn_map)
+
   good_choices <- 1:nrow(nn_map)
   choice <- sample(1:length(good_choices), size = 1, replace = FALSE)
   chosen <- good_choices[choice]
   good_choices <- good_choices[good_choices != good_choices[choice]]
   it <- 0
-  k2 <- k * 2 # Compute once
-  
-  # function for sapply
-  get_shared <- function(other, this_choice) {
-    #k2 - length(union(cell_sample[other,], this_choice)) # less type shuffling = faster?
-    k2 - length(union(cell_sample[other,], this_choice))
-  }
-  
+
   while (length(good_choices) > 0 & it < 5000) { # slow
     it <- it + 1
     choice <- sample(1:length(good_choices), size = 1, replace = FALSE)
     new_chosen <- c(chosen, good_choices[choice])
     good_choices <- good_choices[good_choices != good_choices[choice]]
     cell_sample <- nn_map[new_chosen,]
-    others <- 1:(nrow(cell_sample) - 1)
-    this_choice <- cell_sample[nrow(cell_sample),]
-    shared <- sapply(others, get_shared, this_choice = this_choice)
-    
+    combs <- data.frame(1:(nrow(cell_sample)-1), nrow(cell_sample))
+    shared <- apply(combs, 1, function(x) {
+      (k * 2) - length(unique(as.vector(as.matrix(cell_sample[x,]))))
+    })
+
     if (max(shared) < .9 * k) {
       chosen <- new_chosen
     }
   }
-  
-  cell_sample <- nn_map[chosen,]
-  
-  if(!silent) {
-    # Only need this slow step if !silent
-    combs <- combn(nrow(cell_sample), 2)
 
-    shared <- apply(combs, 2, function(x) {  #slow
-      k2 - length(unique(as.vector(cell_sample[x,])))
-    })
-    
-    message(paste0("Overlap QC metrics:\nCells per bin: ", k,
-                   "\nMaximum shared cells bin-bin: ", max(shared),
-                   "\nMean shared cells bin-bin: ", mean(shared),
-                   "\nMedian shared cells bin-bin: ", median(shared)))
-    
-    if (mean(shared)/k > .1) warning("On average, more than 10% of cells are shared between paired bins.")
+  cell_sample <- nn_map[chosen,]
+  combs <- t(combn(nrow(cell_sample), 2))
+  shared <- apply(combs, 1, function(x) {  #slow
+    (k * 2) - length(unique(as.vector(as.matrix(cell_sample[x,]))))
+  })
+
+  if(!silent) {
+  message(paste0("Overlap QC metrics:\nCells per bin: ", k,
+                 "\nMaximum shared cells bin-bin: ", max(shared),
+                 "\nMean shared cells bin-bin: ", mean(shared),
+                 "\nMedian shared cells bin-bin: ", median(shared)))
+
+  if (mean(shared)/k > .1) warning("On average, more than 10% of cells are
+                                   shared between paired bins.")
   }
-  
+
   exprs_old <- exprs(cds)
-  
+
   x <- lapply(1:nrow(cell_sample), function(x) {
     return(Matrix::rowSums(exprs_old %*%
                              Matrix::Diagonal(x=1:ncol(exprs_old) %in%
-                                                cell_sample[x,,drop=FALSE])))})
+                                                cell_sample[x,])))})
   new_exprs <- do.call(rbind, x)
-  
+
   pdata <- pData(cds)
-  new_pcols <- "agg_cell"
-  if(!is.null(summary_stats)) { 
-    new_pcols <- c(new_pcols, paste0("mean_",summary_stats)) 
-  }
-  
-  new_pdata <- plyr::adply(cell_sample,1, function(x) {
-    sub <- pdata[x,]
+  new_pdata <- plyr::adply(cell_sample, 1, function(x) {
+    sub <- pdata[as.numeric(x[1,]),]
     df_l <- list()
     df_l["temp"] <- 1
     for (att in summary_stats) {
@@ -154,30 +140,31 @@ make_cicero_cds <- function(cds,
     }
     data.frame(df_l)
   })
-  
-  new_pdata$agg_cell <- paste("agg", chosen, sep="")
-  new_pdata <- new_pdata[,new_pcols] # fixes order, drops X1
-  
+
+  new_pdata <- new_pdata[,(k):ncol(new_pdata)]
+
+  new_pdata$agg_cell <- paste("agg", new_pdata$agg_cell, sep="")
+
   row.names(new_pdata) <- new_pdata$agg_cell
   row.names(new_exprs) <- new_pdata$agg_cell
   new_exprs <- as.matrix(t(new_exprs))
-  
+
   fdf <- fData(cds)
   new_pdata$temp <- NULL
-  
+
   fd <- new("AnnotatedDataFrame", data = fdf)
   pd <- new("AnnotatedDataFrame", data = new_pdata)
-  
+
   cicero_cds <-  suppressWarnings(newCellDataSet(new_exprs,
-                                                 phenoData = pd,
-                                                 featureData = fd,
-                                                 expressionFamily=negbinomial.size(),
-                                                 lowerDetectionLimit=0))
-  
+                                phenoData = pd,
+                                featureData = fd,
+                                expressionFamily=negbinomial.size(),
+                                lowerDetectionLimit=0))
+
   cicero_cds <- monocle::detectGenes(cicero_cds, min_expr = .1)
   cicero_cds <- BiocGenerics::estimateSizeFactors(cicero_cds)
   cicero_cds <- suppressWarnings(BiocGenerics::estimateDispersions(cicero_cds))
-  
+
   if (any(!c("chr", "bp1", "bp2") %in% names(fData(cicero_cds)))) {
     fData(cicero_cds)$chr <- NULL
     fData(cicero_cds)$bp1 <- NULL
@@ -185,12 +172,12 @@ make_cicero_cds <- function(cds,
     fData(cicero_cds) <- cbind(fData(cicero_cds),
                                df_for_coords(row.names(fData(cicero_cds))))
   }
-  
+
   if (size_factor_normalize) {
     Biobase::exprs(cicero_cds) <-
       t(t(Biobase::exprs(cicero_cds))/Biobase::pData(cicero_cds)$Size_Factor)
   }
-  
+
   cicero_cds
 }
 
@@ -246,30 +233,30 @@ run_cicero <- function(cds,
   if (!is.data.frame(genomic_coords)) {
     assertthat::is.readable(genomic_coords)
   }
-  
+
   if (!silent) print("Starting Cicero")
   if (!silent) print("Calculating distance_parameter value")
   distance_parameters <- estimate_distance_parameter(cds, window=window,
-                                                     maxit=100, sample_num = sample_num,
-                                                     distance_constraint = 250000,
-                                                     distance_parameter_convergence = 1e-22,
-                                                     genomic_coords = genomic_coords)
-  
+                                  maxit=100, sample_num = sample_num,
+                                   distance_constraint = 250000,
+                                   distance_parameter_convergence = 1e-22,
+                                   genomic_coords = genomic_coords)
+
   mean_distance_parameter <- mean(unlist(distance_parameters))
-  
+
   if (!silent) print("Running models")
   cicero_out <-
     generate_cicero_models(cds,
                            distance_parameter = mean_distance_parameter,
                            window = window,
                            genomic_coords = genomic_coords)
-  
+
   if (!silent) print("Assembling connections")
   all_cons <- assemble_connections(cicero_out, silent=TRUE)
-  
+
   if (!silent) print("Done")
   all_cons
-}
+  }
 
 
 #' Calculate distance penalty parameter
@@ -376,15 +363,15 @@ run_cicero <- function(cds,
 #'   }
 #' @export
 estimate_distance_parameter <- function(cds,
-                                        window=500000,
-                                        maxit=100,
-                                        s=0.75,
-                                        sample_num = 100,
-                                        distance_constraint = 250000,
-                                        distance_parameter_convergence = 1e-22,
-                                        max_elements = 200,
-                                        genomic_coords = cicero::human.hg19.genome) {
-  
+                                   window=500000,
+                                   maxit=100,
+                                   s=0.75,
+                                   sample_num = 100,
+                                   distance_constraint = 250000,
+                                   distance_parameter_convergence = 1e-22,
+                                   max_elements = 200,
+                                   genomic_coords = cicero::human.hg19.genome) {
+
   assertthat::assert_that(is(cds, "CellDataSet"))
   assertthat::assert_that(assertthat::is.number(window))
   assertthat::assert_that(assertthat::is.count(maxit))
@@ -396,52 +383,52 @@ estimate_distance_parameter <- function(cds,
   if (!is.data.frame(genomic_coords)) {
     assertthat::is.readable(genomic_coords)
   }
-  
+
   grs <- generate_windows(window, genomic_coords)
-  
+
   fData(cds)$chr <- gsub("chr", "", fData(cds)$chr)
   fData(cds)$bp1 <- as.numeric(as.character(fData(cds)$bp1))
   fData(cds)$bp2 <- as.numeric(as.character(fData(cds)$bp2))
-  
+
   distance_parameters <- list()
   distance_parameters_calced <- 0
   it <- 0
-  
+
   while(sample_num > distance_parameters_calced & it < 3 * sample_num) {
     it <- it + 1
     win <- sample(1:length(grs), 1)
     GL <- "Error"
     win_range <- get_genomic_range(grs, cds, win)
-    
+
     if (nrow(exprs(win_range))<=1) {
       next()
     }
     if (nrow(exprs(win_range)) > max_elements) {
       next()
     }
-    
+
     dist_matrix <- calc_dist_matrix(win_range)
-    
+
     distance_parameter <- find_distance_parameter(dist_matrix,
-                                                  win_range,
-                                                  maxit = maxit,
-                                                  null_rho = 0,
-                                                  s,
-                                                  distance_constraint = distance_constraint,
-                                                  distance_parameter_convergence =
-                                                    distance_parameter_convergence)
-    
+                        win_range,
+                        maxit = maxit,
+                        null_rho = 0,
+                        s,
+                        distance_constraint = distance_constraint,
+                        distance_parameter_convergence =
+                          distance_parameter_convergence)
+
     if (!is(distance_parameter, "numeric")) next()
     distance_parameters = c(distance_parameters, distance_parameter)
     distance_parameters_calced <- distance_parameters_calced + 1
   }
-  
+
   if(length(distance_parameters) < sample_num)
     warning(paste("Could not calculate sample_num distance_parameters - see",
                   "documentation details", collapse = " "))
   if(length(distance_parameters) == 0)
     stop("No distance_parameters calculated")
-  
+
   unlist(distance_parameters)
 }
 
@@ -530,7 +517,7 @@ generate_cicero_models <- function(cds,
                                    window = 500000,
                                    max_elements = 200,
                                    genomic_coords = cicero::human.hg19.genome) {
-  
+
   assertthat::assert_that(is(cds, "CellDataSet"))
   assertthat::assert_that(assertthat::is.number(distance_parameter))
   assertthat::assert_that(assertthat::is.number(s), s < 1, s > 0)
@@ -539,33 +526,33 @@ generate_cicero_models <- function(cds,
   if (!is.data.frame(genomic_coords)) {
     assertthat::is.readable(genomic_coords)
   }
-  
+
   grs <- generate_windows(window, genomic_coords)
-  
+
   fData(cds)$chr <- gsub("chr", "", fData(cds)$chr)
   fData(cds)$bp1 <- as.numeric(as.character(fData(cds)$bp1))
   fData(cds)$bp2 <- as.numeric(as.character(fData(cds)$bp2))
-  
+
   outlist <- parallel::mclapply(1:length(grs), mc.cores = 1, function(win) {
     GL <- "Error"
-    
+
     win_range <- get_genomic_range(grs, cds, win)
-    
+
     if (nrow(exprs(win_range))<=1) {
       return("Zero or one element in range")
     }
     if (nrow(exprs(win_range)) > max_elements) {
       return("Too many elements in range")
     }
-    
+
     dist_matrix <- calc_dist_matrix(win_range)
-    
+
     rho_mat <- get_rho_mat(dist_matrix, distance_parameter, s)
-    
+
     vals <- exprs(win_range)
     cov_mat <- cov(t(vals))
     diag(cov_mat) <- diag(cov_mat) + 1e-4
-    
+
     GL <- glasso::glasso(cov_mat, rho_mat)
     colnames(GL$w) <- row.names(GL$w) <- row.names(vals)
     colnames(GL$wi) <- row.names(GL$wi) <- row.names(vals)
@@ -575,7 +562,7 @@ generate_cicero_models <- function(cds,
   names(outlist) <- paste(names_df$seqnames,
                           names_df$start,
                           names_df$end, sep="_")
-  
+
   #FIXME add warning about how many regions removed due to too many elements
   outlist
 }
@@ -627,18 +614,18 @@ assemble_connections <- function(cicero_model_list, silent = FALSE) {
     print(table(unlist(char_hbn)))
     print(paste("Models with errors: ", sum(is.null(cicero_model_list))))
   }
-  
+
   cors <- lapply(gl_only, function(gl)  {
     cors <- stats::cov2cor(gl$w)
     data.table::melt(cors)
   })
-  
+
   cors <- data.table::rbindlist(cors)
   data.table::setkey(cors, "Var1", "Var2")
-  
+
   cors_rec <- as.data.frame(cors[,list(mean_coaccess = reconcile(value)),
                                  by="Var1,Var2"])
-  
+
   names(cors_rec) <- c("Peak1", "Peak2", "coaccess")
   cors_rec <- cors_rec[cors_rec$Peak1 != cors_rec$Peak2,]
   return(cors_rec)
@@ -674,9 +661,9 @@ get_genomic_range <- function(grs, cds, win) {
   end1 <- as.numeric(as.character(GenomicRanges::end(grs[win])))
   end2 <- as.numeric(as.character(GenomicRanges::start(grs[win])))
   win_range <- cds[(fData(cds)$bp1 < end1 &
-                      fData(cds)$bp1 > end2) |
-                     (fData(cds)$bp2 < end1 &
-                        fData(cds)$bp2 > end2), ]
+                                fData(cds)$bp1 > end2) |
+                               (fData(cds)$bp2 < end1 &
+                                  fData(cds)$bp2 > end2), ]
   win_range <-
     win_range[as.character(fData(win_range)$chr) ==
                 gsub("chr", "",
@@ -684,21 +671,21 @@ get_genomic_range <- function(grs, cds, win) {
   fData(win_range)$mean_bp <-
     (as.numeric(as.character(fData(win_range)$bp1)) +
        as.numeric(as.character(fData(win_range)$bp2)))/2
-  
+
   return(win_range)
 }
 
 find_distance_parameter <- function(dist_mat,
-                                    gene_range,
-                                    maxit,
-                                    null_rho,
-                                    s,
-                                    distance_constraint,
-                                    distance_parameter_convergence) {
+                       gene_range,
+                       maxit,
+                       null_rho,
+                       s,
+                       distance_constraint,
+                       distance_parameter_convergence) {
   if (sum(dist_mat > distance_constraint)/2 < 1) {
     return("No long edges")
   }
-  
+
   found <- FALSE
   starting_max <- 2
   distance_parameter <- 2
@@ -709,19 +696,19 @@ find_distance_parameter <- function(dist_mat,
     vals <- exprs(gene_range)
     cov_mat <- cov(t(vals))
     diag(cov_mat) <- diag(cov_mat) + 1e-4
-    
+
     rho <- get_rho_mat(dist_mat, distance_parameter, s)
-    
+
     GL <- glasso::glasso(cov_mat, rho)
     big_entries <- sum(dist_mat > distance_constraint)
-    
+
     if (((sum(GL$wi[dist_mat > distance_constraint] != 0)/big_entries) > 0.05) |
         (sum(GL$wi == 0)/(nrow(GL$wi)^2) < 0.2 ) ) {
       longs_zero <- FALSE
     } else {
       longs_zero <- TRUE
     }
-    
+
     if (longs_zero != TRUE | (distance_parameter == 0)) {
       distance_parameter_min <- distance_parameter
     } else {
@@ -729,12 +716,12 @@ find_distance_parameter <- function(dist_mat,
     }
     new_distance_parameter <- (distance_parameter_min +
                                  distance_parameter_max)/2
-    
+
     if(new_distance_parameter == starting_max) {
       new_distance_parameter <- 2 * starting_max
       starting_max <- new_distance_parameter
     }
-    
+
     if (distance_parameter_convergence > abs(distance_parameter -
                                              new_distance_parameter)) {
       found <- TRUE
@@ -758,7 +745,7 @@ get_rho_mat <- function(dist_matrix, distance_parameter, s) {
 calc_dist_matrix <- function(gene_range) {
   dist_mat <- as.matrix(dist(fData(gene_range)$mean_bp))
   row.names(dist_mat) <- colnames(dist_mat) <- row.names(fData(gene_range))
-  
+
   return(dist_mat)
 }
 
@@ -836,7 +823,7 @@ generate_ccans <- function(connections_df,
                                         "between 0 and 1 (or NULL)",
                                         collapse = " "))
   }
-  
+
   if (!is.null(coaccess_cutoff_override)) {
     coaccess_cutoff <- coaccess_cutoff_override
   } else {
@@ -912,7 +899,7 @@ find_overlapping_ccans <- function(ccan_assignments, min_overlap=1) {
     return(data.frame(ccan_coords = paste(ccan$chr[1], bp1 = min(ccan$bp1),
                                           bp2 = max(ccan$bp2), sep="_")))
   })
-  
+
   ccan_ranges <- ranges_for_coords(ccan_info$ccan_coords,
                                    meta_data_df = ccan_info)
   ol <- GenomicRanges::findOverlaps(ccan_ranges, ccan_ranges,
