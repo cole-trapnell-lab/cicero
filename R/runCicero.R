@@ -156,7 +156,7 @@ make_cicero_cds <- function(cds,
   })
   
   new_pdata$agg_cell <- paste("agg", chosen, sep="")
-  new_pdata <- new_pdata[,new_pcols] # fixes order, drops X1
+  new_pdata <- new_pdata[,new_pcols, drop = FALSE] # fixes order, drops X1
   
   row.names(new_pdata) <- new_pdata$agg_cell
   row.names(new_exprs) <- new_pdata$agg_cell
